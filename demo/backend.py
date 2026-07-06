@@ -14,7 +14,7 @@ from RK_face import (
 class TerminalBackend:
     def __init__(self):
         init_data_environment()
-
+        self.win_name = "人脸考勤系统"
         self.cap = None
         self.detector = HandDetector(detection_con=0.7)
         self.tip_ids = [4, 8, 12, 16, 20]
@@ -481,20 +481,29 @@ class TerminalBackend:
     def execute_task(self, choice, user_name=""):
         if choice == '1' and not user_name: return False, "请先填写姓名！"
         self.is_busy = True
-        self.close_camera()
+
+        # 执行前先销毁旧版本残留的image窗口，避免双窗口
+        try:
+            cv.destroyWindow('image')
+        except:
+            pass
+
         try:
             if choice == '1':
                 face_id = self._get_id(user_name)
-                capture_faces(face_id)
+                # GUI模式关闭预览，不弹出独立窗口
+                success = capture_faces(face_id, cam=self.cap, show_preview=False)
+                return success, "采集完成" if success else "采集失败"
+
             elif choice == '2':
                 train_model()
                 self._init_face_model()
+                return True, "训练完成"
+
         except Exception as e:
             return False, f"执行异常: {str(e)}"
         finally:
-            self.open_camera()
             self.is_busy = False
-        return True, "执行完成"
 
     def _get_id(self, name):
         if os.path.exists(names_mapping_path):

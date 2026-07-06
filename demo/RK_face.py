@@ -119,19 +119,44 @@ def check_face_duplicate(gray_face, threshold=60):
         print(f"[校验失败] 重复人脸检测异常: {e}")
         return False, None, 999
 
-def capture_faces(face_id):
-    cam = cv.VideoCapture(0)
-    if not cam.isOpened():
-        print("错误: 无法打开摄像头。")
-        return
+
+def capture_faces(face_id, cam=None, win_name=None, show_preview=True, is_new_user=True):
+    """
+    人脸采集
+    :param face_id: 用户ID
+    :param cam: 外部传入的摄像头实例，不传则自动创建
+    :param win_name: 外部窗口名称，仅独立运行时生效
+    :param show_preview: 是否显示预览窗口，GUI调用时传False避免弹窗
+    :param is_new_user: 是否为新建用户，决定拦截失败时是否回滚删除映射
+    :return: 采集成功返回True，失败返回False
+    """
+    external_cam = cam is not None
+    if not external_cam:
+        cam = cv.VideoCapture(0)
+        if not cam.isOpened():
+            print("错误: 无法打开摄像头。")
+            return False
+
     cam.set(3, 640)
     cam.set(4, 480)
     face_detector = cv.CascadeClassifier('haarcascade_frontalface_default.xml')
     print("\n[信息] 正在初始化人脸捕捉。看着摄像头并等待...")
+
+    # 先获取当前录入的用户名
+    current_name = None
+    if os.path.exists(names_mapping_path):
+        with open(names_mapping_path, 'r', encoding='utf-8') as f:
+            mapping = json.load(f)
+        for name, uid in mapping.items():
+            if uid == face_id:
+                current_name = name
+                break
+
     count = 0
     detect_interval = 5
     frame_count = 0
     duplicate_checked = False
+    window_name = win_name if win_name else 'image'
 
     while True:
         ret, img = cam.read()
@@ -143,40 +168,61 @@ def capture_faces(face_id):
             faces = face_detector.detectMultiScale(gray, 1.3, 5)
 
             for (x, y, w, h) in faces:
-                # 首次检测到人脸时，先做重复校验
                 if not duplicate_checked:
                     is_dup, dup_name, conf = check_face_duplicate(gray[y:y + h, x:x + w])
                     duplicate_checked = True
+
                     if is_dup:
-                        print(f"\n[警告] 检测到重复人脸：与用户 [{dup_name}] 相似度极高 (置信度:{conf:.1f})")
-                        print("禁止重复录入同一张人脸，采集已终止。")
-                        # 回滚刚写入的用户名
-                        if os.path.exists(names_mapping_path):
-                            with open(names_mapping_path, 'r', encoding='utf-8') as f:
-                                mapping = json.load(f)
-                            # 删除本次 face_id 对应的用户名
-                            for name, uid in list(mapping.items()):
-                                if uid == face_id:
-                                    del mapping[name]
-                                    break
-                            with open(names_mapping_path, 'w', encoding='utf-8') as f:
-                                json.dump(mapping, f, ensure_ascii=False, indent=2)
-                        cam.release()
-                        cv.destroyAllWindows()
-                        return
+                        # 关键修正：如果匹配到的就是当前用户本人，不拦截，允许更新样本
+                        if dup_name == current_name:
+                            print(f"[信息] 检测到当前用户 [{dup_name}]，将更新人脸样本 (置信度:{conf:.1f})")
+                        else:
+                            # 匹配到其他用户，才拦截禁止录入
+                            print(f"\n[警告] 检测到重复人脸：与用户 [{dup_name}] 相似度极高 (置信度:{conf:.1f})")
+                            print("禁止同一张人脸绑定多个账号，采集已终止。")
+
+                            # 仅新用户录入失败时回滚删除映射，避免误伤已有用户
+                            if is_new_user and os.path.exists(names_mapping_path):
+                                with open(names_mapping_path, 'r', encoding='utf-8') as f:
+                                    mapping = json.load(f)
+                                for name, uid in list(mapping.items()):
+                                    if uid == face_id:
+                                        del mapping[name]
+                                        break
+                                with open(names_mapping_path, 'w', encoding='utf-8') as f:
+                                    json.dump(mapping, f, ensure_ascii=False, indent=2)
+
+                            if not external_cam:
+                                cam.release()
+                                if show_preview:
+                                    cv.destroyAllWindows()
+                            return False
 
                 cv.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
                 count += 1
                 cv.imwrite(os.path.join(dataset_path, f"User.{face_id}.{count}.jpg"), gray[y:y + h, x:x + w])
+                print(f"[采集进度] {count}/10 张")
                 if count >= 10:
                     break
-            cv.imshow('image', img)
-            k = cv.waitKey(1) & 0xff
-            if k == 27 or count >= 10:
-                break
+
+            if show_preview:
+                cv.imshow(window_name, img)
+                k = cv.waitKey(1) & 0xff
+                if k == 27 or count >= 10:
+                    break
+            else:
+                if count >= 10:
+                    break
+
         frame_count += 1
-    cam.release()
-    cv.destroyAllWindows()
+
+    if not external_cam:
+        cam.release()
+        if show_preview:
+            cv.destroyAllWindows()
+
+    print("[信息] 人脸采集完成")
+    return True
 
 
 def train_model():
