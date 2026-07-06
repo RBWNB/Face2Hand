@@ -92,10 +92,10 @@ class TerminalBackend:
 
         state_y = hint_y + 25
         if getattr(self, 'menu_action_locked', False):
-            img = put_chinese_text(img, "🔒 动作锁定: 请握拳或放下手", (menu_x + 15, state_y), text_color=(231, 76, 60),
+            img = put_chinese_text(img, "[锁定] 请握拳或放下手", (menu_x + 15, state_y), text_color=(231, 76, 60),
                                    font_size=15)
         else:
-            img = put_chinese_text(img, "🔓 等待操作...", (menu_x + 15, state_y), text_color=(46, 204, 113),
+            img = put_chinese_text(img, "[就绪] 等待操作...", (menu_x + 15, state_y), text_color=(46, 204, 113),
                                    font_size=15)
 
         return img
@@ -270,12 +270,12 @@ class TerminalBackend:
 
         elif self.verify_state == 'success':
             self.verify_frame_counter += 1
-            img = put_chinese_text(img, "✅ 验证通过", (20, 80), text_color=(0, 255, 0), font_size=24)
+            img = put_chinese_text(img, "[通过] 验证成功", (20, 80), text_color=(0, 255, 0), font_size=24)
             if self.verify_frame_counter >= self.verify_show_duration: self.cancel_verification()
 
         elif self.verify_state == 'failed':
             self.verify_frame_counter += 1
-            img = put_chinese_text(img, "❌ 验证失败（超时/手势错误）", (20, 80), text_color=(0, 0, 255), font_size=24)
+            img = put_chinese_text(img, "[失败] 超时/手势错误", (20, 80), text_color=(0, 0, 255), font_size=24)
             if self.verify_frame_counter >= self.verify_show_duration: self.cancel_verification()
         return img
 
@@ -341,23 +341,23 @@ class TerminalBackend:
                         if finger_count == 1:
                             if self.today_attendance[name]["in"] == "--:--:--":
                                 self.today_attendance[name]["in"] = time_str
-                                self.attendance_feedback = {"msg": f"✅ {name} 签到成功 ({date_str} {time_str})",
+                                self.attendance_feedback = {"msg": f"[成功] {name} 签到成功 ({date_str} {time_str})",
                                                             "timer": 60}
                             else:
-                                self.attendance_feedback = {"msg": f"⚠️ {name} 今日已签到，请勿重复打卡", "timer": 60}
+                                self.attendance_feedback = {"msg": f"[提示] {name} 今日已签到，请勿重复打卡", "timer": 60}
                         elif finger_count == 2:
                             if self.today_attendance[name]["in"] == "--:--:--":
-                                self.attendance_feedback = {"msg": f"⚠️ {name} 签退失败：请先完成签到", "timer": 60}
+                                self.attendance_feedback = {"msg": f"[警告] {name} 签退失败：请先完成签到", "timer": 60}
                             else:
                                 self.today_attendance[name]["out"] = time_str
-                                self.attendance_feedback = {"msg": f"✅ {name} 签退成功 ({date_str} {time_str})",
+                                self.attendance_feedback = {"msg": f"[成功] {name} 签退成功 ({date_str} {time_str})",
                                                             "timer": 60}
 
                         self.last_sign_timestamp[name] = now_time
                         self._save_attendance()
                     else:
                         if self.attendance_feedback["timer"] == 0:
-                            self.attendance_feedback = {"msg": f"⏳ 操作过快，系统冷却中...", "timer": 20}
+                            self.attendance_feedback = {"msg": f"[冷却] 操作过快，系统冷却中...", "timer": 20}
             else:
                 cv.rectangle(img, (x, y), (x + w, y + h), color, 2)
                 img = put_chinese_text(img, "未注册人员", (x, max(0, y - 30)), text_color=color, font_size=20)
@@ -470,14 +470,11 @@ class TerminalBackend:
 
         try:
             if choice == '1':
-                # 每次新采集前清空缓冲
                 self.captured_faces.clear()
                 is_new_user = user_name not in self.id_name_map.values()
                 face_id = self._get_id(user_name)
 
-                # 本地回调函数，用于实时收集人脸数据
                 def on_face_captured(count, face_roi):
-                    # 将图片复制并压入数组，前端会实时读取它
                     self.captured_faces.append(face_roi.copy())
 
                 success = capture_faces(face_id, cam=self.cap, show_preview=False, capture_callback=on_face_captured)
