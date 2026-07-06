@@ -1,4 +1,5 @@
 import cv2 as cv
+import numpy as np
 import os
 import json
 import time
@@ -33,7 +34,7 @@ class TerminalBackend:
         self.attendance_file = attendance_records_path
         self.today_attendance = {}
         self.last_sign_timestamp = {}
-        self.sign_cooldown = 30  # 30秒防抖冷却
+        self.sign_cooldown = 30
         self.attendance_feedback = {"msg": "", "timer": 0}
         self._load_attendance()
 
@@ -46,44 +47,37 @@ class TerminalBackend:
         self.verify_timeout = 300
         self.verify_show_duration = 60
 
-        # ========== 全手势菜单 ==========
-        self.menu_active = False  # 菜单激活状态
-        self.menu_selected_index = 0  # 当前选中的菜单项索引
-        self.main_menu_items = [  # 主菜单配置：(显示名称, 触发命令)
+        self.menu_active = False
+        self.menu_selected_index = 0
+        self.main_menu_items = [
             ("数据采集", "1"),
             ("模型训练", "2"),
             ("考勤模式", "3"),
             ("退出系统", "4"),
         ]
-        self.menu_gesture_timer = 0  # 菜单手势保持计时器
-        self.menu_last_finger = 0  # 上一帧识别的手指数
-        self.menu_trigger_frames = 15  # 菜单操作触发所需保持帧数
-        self.menu_action_locked = False  # 【新增】动作锁，防止连续触发和秒退
+        self.menu_gesture_timer = 0
+        self.menu_last_finger = 0
+        self.menu_trigger_frames = 15
+        self.menu_action_locked = False
 
     def _draw_menu(self, img):
-        """在画面上绘制手势悬浮菜单"""
         menu_x, menu_y = 30, 60
         item_height = 45
         menu_width = 280
-        # 增加高度以容纳底部状态栏
         menu_height = len(self.main_menu_items) * item_height + 90
 
-        # 绘制半透明黑色背景
         overlay = img.copy()
         cv.rectangle(overlay, (menu_x, menu_y),
                      (menu_x + menu_width, menu_y + menu_height),
                      (0, 0, 0), -1)
         cv.addWeighted(overlay, 0.7, img, 0.3, 0, img)
 
-        # 菜单标题
         img = put_chinese_text(img, "手势主菜单", (menu_x + 15, menu_y + 10),
                                text_color=(255, 255, 255), font_size=22)
 
-        # 遍历绘制菜单项
         for i, (name, _) in enumerate(self.main_menu_items):
             y = menu_y + 45 + i * item_height
             if i == self.menu_selected_index:
-                # 选中项绿色高亮
                 cv.rectangle(img, (menu_x + 5, y - 5),
                              (menu_x + menu_width - 5, y + item_height - 10),
                              (46, 204, 113), -1)
@@ -95,7 +89,6 @@ class TerminalBackend:
             img = put_chinese_text(img, f"{prefix}{name}", (menu_x + 15, y),
                                    text_color=text_color, font_size=20)
 
-        # 底部操作提示与状态锁展示
         hint_y = menu_y + menu_height - 50
         img = put_chinese_text(img, "1/2切换 | 3确认 | 4/5退出", (menu_x + 15, hint_y),
                                text_color=(150, 150, 150), font_size=16)
@@ -111,28 +104,23 @@ class TerminalBackend:
         return img
 
     def _process_menu_gesture(self, finger_count, img):
-        """处理菜单内的手势交互，带边缘触发与防抖锁"""
         triggered_cmd = None
 
-        # 【核心优化1】中立状态解锁：只要识别到0指（握拳，或者手不在画面内），就解除动作锁
         if finger_count == 0:
             self.menu_action_locked = False
             self.menu_gesture_timer = 0
             self.menu_last_finger = 0
             return None, img
 
-        # 如果处于锁定状态，则忽略任何1-5指的输入
         if self.menu_action_locked:
             return None, img
 
-        # 手势保持计时逻辑
         if finger_count == self.menu_last_finger and finger_count != 0:
             self.menu_gesture_timer += 1
         else:
             self.menu_gesture_timer = 1
             self.menu_last_finger = finger_count
 
-        # 【核心优化2】菜单内独立进度条：给用户明确的确认感
         if self.menu_last_finger in [1, 2, 3, 4, 5]:
             bar_w = int(200 * (self.menu_gesture_timer / self.menu_trigger_frames))
             cv.rectangle(img, (340, 70), (540, 85), (100, 100, 100), 2)
@@ -140,11 +128,10 @@ class TerminalBackend:
             img = put_chinese_text(img, f"指令 {self.menu_last_finger}", (340, 40),
                                    text_color=(46, 204, 113), font_size=18)
 
-        # 达到触发阈值执行对应操作
         if self.menu_gesture_timer >= self.menu_trigger_frames:
             if finger_count == 1:
                 self.menu_selected_index = (self.menu_selected_index - 1) % len(self.main_menu_items)
-                self.menu_action_locked = True  # 【核心优化3】执行后立即加锁
+                self.menu_action_locked = True
             elif finger_count == 2:
                 self.menu_selected_index = (self.menu_selected_index + 1) % len(self.main_menu_items)
                 self.menu_action_locked = True
@@ -157,7 +144,7 @@ class TerminalBackend:
                 self.menu_active = False
                 self.menu_action_locked = True
 
-            self.menu_gesture_timer = 0  # 执行后重置计时
+            self.menu_gesture_timer = 0
 
         return triggered_cmd, img
 
@@ -189,9 +176,11 @@ class TerminalBackend:
         with open(names_mapping_path, 'r', encoding='utf-8') as f:
             mapping = json.load(f)
         if user_name not in mapping: return False, f"未找到用户：{user_name}"
+
         user_id = mapping.pop(user_name)
         with open(names_mapping_path, 'w', encoding='utf-8') as f:
             json.dump(mapping, f, ensure_ascii=False, indent=2)
+
         if os.path.exists(dataset_path):
             for filename in os.listdir(dataset_path):
                 if filename.startswith(f"User.{user_id}."):
@@ -203,7 +192,6 @@ class TerminalBackend:
             self.gesture_passwords.pop(user_name)
             self._save_gesture_passwords()
 
-        # 删除用户后同步清除模型文件，强制重新训练
         if os.path.exists(model_file):
             try:
                 os.remove(model_file)
@@ -432,11 +420,9 @@ class TerminalBackend:
             triggered_command = None
         else:
             if self.menu_active:
-                # ========== 菜单模式：带有安全锁和进度条的处理 ==========
                 triggered_command, img = self._process_menu_gesture(finger_count, img)
                 img = self._draw_menu(img)
             else:
-                # ========== 非菜单模式 ==========
                 if self.attendance_mode:
                     img = self._process_attendance_frame(img, finger_count)
 
@@ -464,7 +450,6 @@ class TerminalBackend:
 
                         if self.gesture_hold_timer >= self.confirm_frames:
                             if finger_count == 5:
-                                # 5指：激活菜单并【立即加锁】
                                 self.menu_active = True
                                 self.menu_selected_index = 0
                                 self.menu_action_locked = True
@@ -482,7 +467,6 @@ class TerminalBackend:
         if choice == '1' and not user_name: return False, "请先填写姓名！"
         self.is_busy = True
 
-        # 执行前先销毁旧版本残留的image窗口，避免双窗口
         try:
             cv.destroyWindow('image')
         except:
@@ -490,10 +474,20 @@ class TerminalBackend:
 
         try:
             if choice == '1':
+                # 判断此用户是否为之前不存在的全新用户
+                is_new_user = user_name not in self.id_name_map.values()
+
                 face_id = self._get_id(user_name)
+
                 # GUI模式关闭预览，不弹出独立窗口
                 success = capture_faces(face_id, cam=self.cap, show_preview=False)
-                return success, "采集完成" if success else "采集失败"
+
+                if not success and is_new_user:
+                    # 如果防伪拦截失败且是新用户，直接用统一接口彻底删除映射和手势，防止出现孤儿数据
+                    self.delete_user(user_name)
+                    return False, "采集被终止：检测到已有重复人脸，注册已撤销"
+
+                return success, "采集完成" if success else "采集被终止"
 
             elif choice == '2':
                 train_model()

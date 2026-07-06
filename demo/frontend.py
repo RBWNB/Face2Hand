@@ -1,8 +1,11 @@
+import threading
 from tkinter import messagebox, ttk, simpledialog
 import customtkinter as ctk
 import cv2 as cv
+import numpy as np
 from PIL import Image
 from backend import TerminalBackend
+from RK_face import put_chinese_text
 
 # ==================== 全局主题设置 ====================
 ctk.set_appearance_mode("Dark")
@@ -21,6 +24,8 @@ class SmartTerminalUI:
             self.root.quit()
 
         self.pending_action = None
+        self.task_thread = None  # 后台任务线程
+        self.task_result = None  # 后台任务执行结果
 
         self.setup_ui()
         self.refresh_user_list()
@@ -75,7 +80,6 @@ class SmartTerminalUI:
         ctk.CTkButton(tab, text="[3] 考勤模式", fg_color="#E67E22", hover_color="#D35400",
                       command=lambda: self.on_action_triggered('3'), **btn_kwargs).pack(fill="x", padx=10, pady=6)
 
-        # 增加提示文本
         hint_label = ctk.CTkLabel(tab, text="💡 考勤模式下：伸出1指签到，伸出2指签退", font=ctk.CTkFont(size=12),
                                   text_color="#BDC3C7")
         hint_label.pack(pady=(0, 10))
@@ -154,8 +158,29 @@ class SmartTerminalUI:
         style.map("Treeview.Heading", background=[('active', '#3E3E3E')])
 
     # ===================== 业务与画面刷新 =====================
+    def _show_loading_frame(self):
+        """后台处理时，主画面展示等待动画"""
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
+        img = put_chinese_text(img, "系统运行中...", (210, 200), text_color=(0, 255, 255), font_size=36)
+        img = put_chinese_text(img, "请不要关闭系统", (240, 260), text_color=(200, 200, 200), font_size=22)
+        cv2_im = cv.cvtColor(img, cv.COLOR_BGR2RGB)
+        pil_im = Image.fromarray(cv2_im)
+        ctk_img = ctk.CTkImage(light_image=pil_im, dark_image=pil_im, size=(640, 480))
+        self.video_label.configure(image=ctk_img)
+        self.video_label.image = ctk_img
+
     def update_loop(self):
-        if not self.backend.is_busy:
+        # 检测后台线程是否执行完毕
+        if self.task_thread and not self.task_thread.is_alive():
+            success, msg, choice = self.task_result
+            self.task_thread = None
+            self.task_result = None
+            self._on_task_finished(success, msg, choice)
+
+        if self.backend.is_busy or self.task_thread:
+            self._show_loading_frame()
+        else:
+            # 只有系统空闲时，主线程才去读取摄像头
             img, cmd = self.backend.get_frame_and_gesture()
             if img is not None:
                 img_h, img_w, _ = img.shape
@@ -178,6 +203,7 @@ class SmartTerminalUI:
                 elif self.backend.verify_state == 'failed':
                     self._cancel_pending_action("验证失败，操作已取消")
 
+        # 循环调用
         self.root.after(15, self.update_loop)
 
     def refresh_user_list(self):
@@ -248,13 +274,13 @@ class SmartTerminalUI:
             else:
                 in_time = record
                 out_time = "--:--:--"
-
             self.attendance_tree.insert("", "end", values=(name, in_time, out_time))
 
         self.attendance_count_label.configure(text=f"TOTAL RECORDS: {len(attendance_data)}")
 
     def on_action_triggered(self, choice):
-        if self.pending_action: return
+        # 拦截：如果当前已有挂起操作或正在执行后台线程，不响应新操作
+        if self.pending_action or self.task_thread: return
 
         if choice == '3':
             success, msg = self.backend.toggle_attendance_mode()
@@ -274,15 +300,25 @@ class SmartTerminalUI:
             messagebox.showwarning("提示", "请先填写姓名！")
             return
 
+        # 启动后台线程执行核心任务，防止 UI 卡死
         self.status_label.configure(text="SYS: PROCESSING...", text_color="#F39C12")
-        self.root.update()
+        self.task_thread = threading.Thread(target=self._run_backend_task, args=(choice, name))
+        self.task_thread.daemon = True
+        self.task_thread.start()
 
+    def _run_backend_task(self, choice, name):
+        """后台实际调用的任务函数"""
         success, msg = self.backend.execute_task(choice, name)
+        self.task_result = (success, msg, choice)
 
+    def _on_task_finished(self, success, msg, choice):
+        """后台任务完成后的主线程回调（恢复UI、弹窗提示）"""
         self.status_label.configure(text="SYS: STANDBY", text_color="#2ECC71")
         self.name_entry.delete(0, 'end')
 
-        if success and choice in ('1', '2'): self.refresh_user_list()
+        if success and choice in ('1', '2'):
+            self.refresh_user_list()
+
         if not success:
             messagebox.showerror("系统提示", msg)
         else:
