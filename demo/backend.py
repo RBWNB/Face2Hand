@@ -30,6 +30,8 @@ class TerminalBackend:
         self.id_name_map = {}
         self._init_face_model()
 
+        self.captured_faces = []
+
         self.attendance_mode = False
         self.attendance_file = attendance_records_path
         self.today_attendance = {}
@@ -67,39 +69,34 @@ class TerminalBackend:
         menu_height = len(self.main_menu_items) * item_height + 90
 
         overlay = img.copy()
-        cv.rectangle(overlay, (menu_x, menu_y),
-                     (menu_x + menu_width, menu_y + menu_height),
-                     (0, 0, 0), -1)
+        cv.rectangle(overlay, (menu_x, menu_y), (menu_x + menu_width, menu_y + menu_height), (0, 0, 0), -1)
         cv.addWeighted(overlay, 0.7, img, 0.3, 0, img)
 
-        img = put_chinese_text(img, "手势主菜单", (menu_x + 15, menu_y + 10),
-                               text_color=(255, 255, 255), font_size=22)
+        img = put_chinese_text(img, "手势主菜单", (menu_x + 15, menu_y + 10), text_color=(255, 255, 255), font_size=22)
 
         for i, (name, _) in enumerate(self.main_menu_items):
             y = menu_y + 45 + i * item_height
             if i == self.menu_selected_index:
-                cv.rectangle(img, (menu_x + 5, y - 5),
-                             (menu_x + menu_width - 5, y + item_height - 10),
-                             (46, 204, 113), -1)
+                cv.rectangle(img, (menu_x + 5, y - 5), (menu_x + menu_width - 5, y + item_height - 10), (46, 204, 113),
+                             -1)
                 text_color = (255, 255, 255)
                 prefix = "▶ "
             else:
                 text_color = (200, 200, 200)
                 prefix = "  "
-            img = put_chinese_text(img, f"{prefix}{name}", (menu_x + 15, y),
-                                   text_color=text_color, font_size=20)
+            img = put_chinese_text(img, f"{prefix}{name}", (menu_x + 15, y), text_color=text_color, font_size=20)
 
         hint_y = menu_y + menu_height - 50
-        img = put_chinese_text(img, "1/2切换 | 3确认 | 4/5退出", (menu_x + 15, hint_y),
-                               text_color=(150, 150, 150), font_size=16)
+        img = put_chinese_text(img, "1/2切换 | 3确认 | 4/5退出", (menu_x + 15, hint_y), text_color=(150, 150, 150),
+                               font_size=16)
 
         state_y = hint_y + 25
         if getattr(self, 'menu_action_locked', False):
-            img = put_chinese_text(img, "🔒 动作锁定: 请握拳或放下手", (menu_x + 15, state_y),
-                                   text_color=(231, 76, 60), font_size=15)
+            img = put_chinese_text(img, "🔒 动作锁定: 请握拳或放下手", (menu_x + 15, state_y), text_color=(231, 76, 60),
+                                   font_size=15)
         else:
-            img = put_chinese_text(img, "🔓 等待操作...", (menu_x + 15, state_y),
-                                   text_color=(46, 204, 113), font_size=15)
+            img = put_chinese_text(img, "🔓 等待操作...", (menu_x + 15, state_y), text_color=(46, 204, 113),
+                                   font_size=15)
 
         return img
 
@@ -125,8 +122,8 @@ class TerminalBackend:
             bar_w = int(200 * (self.menu_gesture_timer / self.menu_trigger_frames))
             cv.rectangle(img, (340, 70), (540, 85), (100, 100, 100), 2)
             cv.rectangle(img, (340, 70), (340 + bar_w, 85), (46, 204, 113), -1)
-            img = put_chinese_text(img, f"指令 {self.menu_last_finger}", (340, 40),
-                                   text_color=(46, 204, 113), font_size=18)
+            img = put_chinese_text(img, f"指令 {self.menu_last_finger}", (340, 40), text_color=(46, 204, 113),
+                                   font_size=18)
 
         if self.menu_gesture_timer >= self.menu_trigger_frames:
             if finger_count == 1:
@@ -156,7 +153,7 @@ class TerminalBackend:
                 self.recognizer.read(model_file)
             self._refresh_name_mapping()
         except Exception as e:
-            print(f"[警告] 人脸识别模型加载失败：{e}，请先训练模型")
+            pass
 
     def _refresh_name_mapping(self):
         if os.path.exists(names_mapping_path):
@@ -188,6 +185,7 @@ class TerminalBackend:
                         os.remove(os.path.join(dataset_path, filename))
                     except:
                         pass
+
         if user_name in self.gesture_passwords:
             self.gesture_passwords.pop(user_name)
             self._save_gesture_passwords()
@@ -347,7 +345,6 @@ class TerminalBackend:
                                                             "timer": 60}
                             else:
                                 self.attendance_feedback = {"msg": f"⚠️ {name} 今日已签到，请勿重复打卡", "timer": 60}
-
                         elif finger_count == 2:
                             if self.today_attendance[name]["in"] == "--:--:--":
                                 self.attendance_feedback = {"msg": f"⚠️ {name} 签退失败：请先完成签到", "timer": 60}
@@ -417,7 +414,6 @@ class TerminalBackend:
         triggered_command = None
         if self.verify_state != 'idle':
             img = self._process_verification_frame(img, finger_count)
-            triggered_command = None
         else:
             if self.menu_active:
                 triggered_command, img = self._process_menu_gesture(finger_count, img)
@@ -438,8 +434,8 @@ class TerminalBackend:
                             self.gesture_hold_timer = 1
 
                         if finger_count == 5:
-                            img = put_chinese_text(img, "唤出手势菜单...", (20, 70),
-                                                   text_color=(0, 255, 255), font_size=20)
+                            img = put_chinese_text(img, "唤出手势菜单...", (20, 70), text_color=(0, 255, 255),
+                                                   font_size=20)
                         else:
                             img = put_chinese_text(img, f"Trigger Option {finger_count}...", (20, 70),
                                                    text_color=(0, 255, 0), font_size=20)
@@ -474,16 +470,19 @@ class TerminalBackend:
 
         try:
             if choice == '1':
-                # 判断此用户是否为之前不存在的全新用户
+                # 每次新采集前清空缓冲
+                self.captured_faces.clear()
                 is_new_user = user_name not in self.id_name_map.values()
-
                 face_id = self._get_id(user_name)
 
-                # GUI模式关闭预览，不弹出独立窗口
-                success = capture_faces(face_id, cam=self.cap, show_preview=False)
+                # 本地回调函数，用于实时收集人脸数据
+                def on_face_captured(count, face_roi):
+                    # 将图片复制并压入数组，前端会实时读取它
+                    self.captured_faces.append(face_roi.copy())
+
+                success = capture_faces(face_id, cam=self.cap, show_preview=False, capture_callback=on_face_captured)
 
                 if not success and is_new_user:
-                    # 如果防伪拦截失败且是新用户，直接用统一接口彻底删除映射和手势，防止出现孤儿数据
                     self.delete_user(user_name)
                     return False, "采集被终止：检测到已有重复人脸，注册已撤销"
 
@@ -507,7 +506,6 @@ class TerminalBackend:
             mapping = {}
 
         if name in mapping: return mapping[name]
-
         new_id = max(mapping.values(), default=0) + 1
         mapping[name] = new_id
         with open(names_mapping_path, 'w', encoding='utf-8') as f:

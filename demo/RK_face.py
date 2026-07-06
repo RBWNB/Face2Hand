@@ -109,10 +109,7 @@ def check_face_duplicate(gray_face, threshold=60):
         return False, None, 999
 
 
-def capture_faces(face_id, cam=None, win_name=None, show_preview=True):
-    """
-    人脸采集
-    """
+def capture_faces(face_id, cam=None, win_name=None, show_preview=True, capture_callback=None):
     external_cam = cam is not None
     if not external_cam:
         cam = cv.VideoCapture(0)
@@ -137,7 +134,7 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True):
     count = 0
     detect_interval = 5
     frame_count = 0
-    check_count = 0  # 【关键优化】将一次校验改为多次校验
+    check_count = 0
     window_name = win_name if win_name else 'image'
 
     while True:
@@ -150,7 +147,6 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True):
             faces = face_detector.detectMultiScale(gray, 1.3, 5)
 
             for (x, y, w, h) in faces:
-                # 仅在前 3 次捕获人脸时做排重校验，防止首张图片模糊或背景路人干扰
                 if check_count < 3:
                     is_dup, dup_name, conf = check_face_duplicate(gray[y:y + h, x:x + w])
                     check_count += 1
@@ -159,11 +155,7 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True):
                         if dup_name == current_name:
                             print(f"[信息] 检测到当前用户 [{dup_name}]，将更新人脸样本 (置信度:{conf:.1f})")
                         else:
-                            print(f"\n[警告] 检测到重复人脸：与用户 [{dup_name}] 相似度极高 (置信度:{conf:.1f})")
-                            print("禁止同一张人脸绑定多个账号，采集已终止。")
-
-                            # 注意：这里不再执行任何回滚JSON的代码，交由 backend 统一调度
-
+                            print(f"\n[警告] 检测到重复人脸：与用户 [{dup_name}] 相似度极高")
                             if not external_cam:
                                 cam.release()
                                 if show_preview:
@@ -172,7 +164,15 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True):
 
                 cv.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
                 count += 1
-                cv.imwrite(os.path.join(dataset_path, f"User.{face_id}.{count}.jpg"), gray[y:y + h, x:x + w])
+
+                # 提取人脸灰度图原图
+                face_roi = gray[y:y + h, x:x + w]
+                cv.imwrite(os.path.join(dataset_path, f"User.{face_id}.{count}.jpg"), face_roi)
+
+                # 触发回调函数，将人脸原图送到上层去展示
+                if capture_callback:
+                    capture_callback(count, face_roi)
+
                 print(f"[采集进度] {count}/10 张")
                 if count >= 10:
                     break
@@ -193,7 +193,6 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True):
         if show_preview:
             cv.destroyAllWindows()
 
-    print("[信息] 人脸采集完成")
     return True
 
 

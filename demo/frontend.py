@@ -24,20 +24,21 @@ class SmartTerminalUI:
             self.root.quit()
 
         self.pending_action = None
-        self.task_thread = None  # 后台任务线程
-        self.task_result = None  # 后台任务执行结果
+        self.task_thread = None
+        self.task_result = None
+
+        # 记录当前后台正在执行什么任务，用于决定如何渲染Loading画面
+        self.current_task = None
 
         self.setup_ui()
         self.refresh_user_list()
         self.update_loop()
 
     def setup_ui(self):
-        # ========== 主布局：左右分栏 ==========
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_columnconfigure(1, weight=0)
         self.root.grid_rowconfigure(0, weight=1)
 
-        # ========== 左侧：视频画面区域 ==========
         self.video_frame = ctk.CTkFrame(self.root, corner_radius=15)
         self.video_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
 
@@ -132,7 +133,6 @@ class SmartTerminalUI:
         self.attendance_tree.heading("name", text="姓名")
         self.attendance_tree.heading("sign_in", text="签到时间")
         self.attendance_tree.heading("sign_out", text="签退时间")
-
         self.attendance_tree.column("name", width=60, anchor="center")
         self.attendance_tree.column("sign_in", width=80, anchor="center")
         self.attendance_tree.column("sign_out", width=80, anchor="center")
@@ -157,12 +157,49 @@ class SmartTerminalUI:
                         font=("微软雅黑", 10, "bold"))
         style.map("Treeview.Heading", background=[('active', '#3E3E3E')])
 
-    # ===================== 业务与画面刷新 =====================
     def _show_loading_frame(self):
-        """后台处理时，主画面展示等待动画"""
+        """后台处理时，根据任务类型展示对应的数据面板"""
         img = np.zeros((480, 640, 3), dtype=np.uint8)
-        img = put_chinese_text(img, "系统运行中...", (210, 200), text_color=(0, 255, 255), font_size=36)
-        img = put_chinese_text(img, "请不要关闭系统", (240, 260), text_color=(200, 200, 200), font_size=22)
+
+        if self.current_task == '1':
+            # ========== 数据采集模式：绘制十宫格 ==========
+            faces = list(self.backend.captured_faces)  # 获取目前拍到的照片列表
+
+            # 顶部标题
+            img = put_chinese_text(img, f"人脸数据采集进行中... [{len(faces)}/10]", (140, 35),
+                                   text_color=(46, 204, 113), font_size=24)
+
+            # 绘制 2行5列 网格
+            for i in range(10):
+                row = i // 5
+                col = i % 5
+
+                # 计算每个格子的起点坐标 (100x100的方块)
+                px = 35 + col * 115
+                py = 100 + row * 160
+
+                # 先画底层未激活的暗色边框
+                cv.rectangle(img, (px - 2, py - 2), (px + 102, py + 102), (50, 50, 50), 2)
+
+                if i < len(faces):
+                    # 如果该坑位已有图片，将其调整到 100x100 大小并填入
+                    face_gray = faces[i]
+                    face_resized = cv.resize(face_gray, (100, 100))
+                    # 灰度转彩色用于贴图
+                    face_bgr = cv.cvtColor(face_resized, cv.COLOR_GRAY2BGR)
+                    img[py:py + 100, px:px + 100] = face_bgr
+
+                    # 给已有图片的坑位画上高亮边框
+                    cv.rectangle(img, (px - 2, py - 2), (px + 102, py + 102), (0, 255, 0), 2)
+                    # 添加小序号
+                    img = put_chinese_text(img, f"#{i + 1}", (px + 35, py + 110), text_color=(200, 200, 200),
+                                           font_size=14)
+
+        else:
+            # ========== 模型训练模式：正常展示载入动画 ==========
+            img = put_chinese_text(img, "模型训练中...", (220, 200), text_color=(0, 255, 255), font_size=36)
+            img = put_chinese_text(img, "请不要关闭系统", (240, 260), text_color=(200, 200, 200), font_size=22)
+
         cv2_im = cv.cvtColor(img, cv.COLOR_BGR2RGB)
         pil_im = Image.fromarray(cv2_im)
         ctk_img = ctk.CTkImage(light_image=pil_im, dark_image=pil_im, size=(640, 480))
@@ -170,7 +207,6 @@ class SmartTerminalUI:
         self.video_label.image = ctk_img
 
     def update_loop(self):
-        # 检测后台线程是否执行完毕
         if self.task_thread and not self.task_thread.is_alive():
             success, msg, choice = self.task_result
             self.task_thread = None
@@ -180,7 +216,6 @@ class SmartTerminalUI:
         if self.backend.is_busy or self.task_thread:
             self._show_loading_frame()
         else:
-            # 只有系统空闲时，主线程才去读取摄像头
             img, cmd = self.backend.get_frame_and_gesture()
             if img is not None:
                 img_h, img_w, _ = img.shape
@@ -203,7 +238,6 @@ class SmartTerminalUI:
                 elif self.backend.verify_state == 'failed':
                     self._cancel_pending_action("验证失败，操作已取消")
 
-        # 循环调用
         self.root.after(15, self.update_loop)
 
     def refresh_user_list(self):
@@ -279,7 +313,6 @@ class SmartTerminalUI:
         self.attendance_count_label.configure(text=f"TOTAL RECORDS: {len(attendance_data)}")
 
     def on_action_triggered(self, choice):
-        # 拦截：如果当前已有挂起操作或正在执行后台线程，不响应新操作
         if self.pending_action or self.task_thread: return
 
         if choice == '3':
@@ -300,19 +333,22 @@ class SmartTerminalUI:
             messagebox.showwarning("提示", "请先填写姓名！")
             return
 
-        # 启动后台线程执行核心任务，防止 UI 卡死
         self.status_label.configure(text="SYS: PROCESSING...", text_color="#F39C12")
+
+        # 记录当前状态给渲染函数用
+        self.current_task = choice
+
         self.task_thread = threading.Thread(target=self._run_backend_task, args=(choice, name))
         self.task_thread.daemon = True
         self.task_thread.start()
 
     def _run_backend_task(self, choice, name):
-        """后台实际调用的任务函数"""
         success, msg = self.backend.execute_task(choice, name)
         self.task_result = (success, msg, choice)
 
     def _on_task_finished(self, success, msg, choice):
-        """后台任务完成后的主线程回调（恢复UI、弹窗提示）"""
+        # 【重置状态】任务结束清空标记
+        self.current_task = None
         self.status_label.configure(text="SYS: STANDBY", text_color="#2ECC71")
         self.name_entry.delete(0, 'end')
 
