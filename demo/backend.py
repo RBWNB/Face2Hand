@@ -189,11 +189,9 @@ class TerminalBackend:
         with open(names_mapping_path, 'r', encoding='utf-8') as f:
             mapping = json.load(f)
         if user_name not in mapping: return False, f"未找到用户：{user_name}"
-
         user_id = mapping.pop(user_name)
         with open(names_mapping_path, 'w', encoding='utf-8') as f:
             json.dump(mapping, f, ensure_ascii=False, indent=2)
-
         if os.path.exists(dataset_path):
             for filename in os.listdir(dataset_path):
                 if filename.startswith(f"User.{user_id}."):
@@ -201,13 +199,19 @@ class TerminalBackend:
                         os.remove(os.path.join(dataset_path, filename))
                     except:
                         pass
-
         if user_name in self.gesture_passwords:
             self.gesture_passwords.pop(user_name)
             self._save_gesture_passwords()
 
+        # 删除用户后同步清除模型文件，强制重新训练
+        if os.path.exists(model_file):
+            try:
+                os.remove(model_file)
+            except:
+                pass
+
         self._refresh_name_mapping()
-        return True, f"用户 {user_name} 已删除，请重新训练模型以完全生效"
+        return True, f"用户 {user_name} 已删除，模型缓存已清理，请重新训练模型"
 
     def _load_gesture_passwords(self):
         if os.path.exists(gesture_password_path):

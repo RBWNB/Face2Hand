@@ -86,6 +86,39 @@ def input_names():
     return new_id
 
 
+def check_face_duplicate(gray_face, threshold=60):
+    """
+    检测人脸是否已被注册（仅校验当前有效用户）
+    :param gray_face: 裁剪后的灰度人脸图
+    :param threshold: 相似度阈值，值越小判定越严格
+    :return: (是否重复, 匹配到的用户名, 置信度数值)
+    """
+    if not os.path.exists(model_file):
+        return False, None, 999  # 无模型文件时跳过校验，首个用户正常录入
+    try:
+        recognizer = cv.face.LBPHFaceRecognizer_create()
+        recognizer.read(model_file)
+        face_id, confidence = recognizer.predict(gray_face)
+
+        # 加载姓名映射
+        if os.path.exists(names_mapping_path):
+            with open(names_mapping_path, 'r', encoding='utf-8') as f:
+                names_mapping = json.load(f)
+            id_name = {v: k for k, v in names_mapping.items()}
+            name = id_name.get(face_id, None)
+        else:
+            name = None
+
+        # 关键修正：只有匹配到有效用户，且置信度小于阈值，才判定为重复
+        if name is not None and confidence < threshold:
+            return True, name, confidence
+
+        # 匹配到的ID不存在于用户列表 → 模型残留脏数据，不判定为重复
+        return False, None, confidence
+    except Exception as e:
+        print(f"[校验失败] 重复人脸检测异常: {e}")
+        return False, None, 999
+
 def capture_faces(face_id):
     cam = cv.VideoCapture(0)
     if not cam.isOpened():
@@ -98,14 +131,40 @@ def capture_faces(face_id):
     count = 0
     detect_interval = 5
     frame_count = 0
+    duplicate_checked = False
+
     while True:
         ret, img = cam.read()
         if not ret:
             break
         gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+
         if frame_count % detect_interval == 0:
             faces = face_detector.detectMultiScale(gray, 1.3, 5)
+
             for (x, y, w, h) in faces:
+                # 首次检测到人脸时，先做重复校验
+                if not duplicate_checked:
+                    is_dup, dup_name, conf = check_face_duplicate(gray[y:y + h, x:x + w])
+                    duplicate_checked = True
+                    if is_dup:
+                        print(f"\n[警告] 检测到重复人脸：与用户 [{dup_name}] 相似度极高 (置信度:{conf:.1f})")
+                        print("禁止重复录入同一张人脸，采集已终止。")
+                        # 回滚刚写入的用户名
+                        if os.path.exists(names_mapping_path):
+                            with open(names_mapping_path, 'r', encoding='utf-8') as f:
+                                mapping = json.load(f)
+                            # 删除本次 face_id 对应的用户名
+                            for name, uid in list(mapping.items()):
+                                if uid == face_id:
+                                    del mapping[name]
+                                    break
+                            with open(names_mapping_path, 'w', encoding='utf-8') as f:
+                                json.dump(mapping, f, ensure_ascii=False, indent=2)
+                        cam.release()
+                        cv.destroyAllWindows()
+                        return
+
                 cv.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
                 count += 1
                 cv.imwrite(os.path.join(dataset_path, f"User.{face_id}.{count}.jpg"), gray[y:y + h, x:x + w])
@@ -136,12 +195,41 @@ def train_model():
             for (x, y, w, h) in faces:
                 faceSamples.append(img_numpy[y:y + h, x:x + w])
                 ids.append(id)
-        return faceSamples, ids
+        return faceSamples, ids, imagePaths
 
     print("\n[信息] 正在训练人脸识别模型。请稍候...")
-    faces, ids = getImagesAndLabels(dataset_path)
+    faces, ids, image_paths = getImagesAndLabels(dataset_path)
     recognizer.train(faces, np.array(ids))
     recognizer.write(model_file)
+
+    print("\n[信息] 正在校验人脸样本重复性...")
+    duplicate_warn = []
+    if os.path.exists(names_mapping_path):
+        with open(names_mapping_path, 'r', encoding='utf-8') as f:
+            names_mapping = json.load(f)
+        id_name = {v: k for k, v in names_mapping.items()}
+    else:
+        id_name = {}
+
+    for idx, face in enumerate(faces):
+        pred_id, conf = recognizer.predict(face)
+        real_id = ids[idx]
+        # 预测ID与真实ID不一致，且置信度很高 = 不同账号但人脸重复
+        if pred_id != real_id and conf < 55:
+            real_name = id_name.get(real_id, f"ID{real_id}")
+            pred_name = id_name.get(pred_id, f"ID{pred_id}")
+            warn_msg = f"样本 {os.path.basename(image_paths[idx])} 与用户 [{pred_name}] 高度相似(置信度:{conf:.1f})，疑似重复录入"
+            if warn_msg not in duplicate_warn:
+                duplicate_warn.append(warn_msg)
+
+    if duplicate_warn:
+        print("\n[警告] 检测到疑似重复人脸样本：")
+        for msg in duplicate_warn:
+            print(f"  - {msg}")
+        print("建议清理重复样本后重新训练，避免识别混乱。")
+    else:
+        print("[信息] 样本校验完成，未发现明显重复人脸。")
+
     print(f"\n[信息] {len(np.unique(ids))} 张人脸已训练。程序结束")
 
 
