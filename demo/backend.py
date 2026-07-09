@@ -8,7 +8,8 @@ from handutil import HandDetector
 from RK_face import (
     capture_faces, train_model, names_mapping_path, put_chinese_text,
     dataset_path, gesture_password_path, attendance_records_path,
-    model_file, init_data_environment
+    model_file, init_data_environment, preprocess_face,
+    CONFIDENCE_THRESHOLD
 )
 
 
@@ -321,7 +322,7 @@ class TerminalBackend:
             return img
 
         gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(30, 30))
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=7, minSize=(60, 60))
         cv.rectangle(img, (10, 10), (450, 120), (0, 0, 0), -1)
         img = put_chinese_text(img, "【双因子安全验证】", (20, 15), text_color=(255, 255, 255), font_size=24)
 
@@ -329,8 +330,10 @@ class TerminalBackend:
             img = put_chinese_text(img, f"第一步：请正对摄像头 [{self.verify_target_user}]", (20, 75),
                                    text_color=(255, 255, 0), font_size=20)
             for (x, y, w, h) in faces:
-                face_id, confidence = self.recognizer.predict(gray[y:y + h, x:x + w])
-                if confidence < 100:
+                face_roi = gray[y:y + h, x:x + w]
+                face_preprocessed = preprocess_face(face_roi)
+                face_id, confidence = self.recognizer.predict(face_preprocessed)
+                if confidence < CONFIDENCE_THRESHOLD:
                     name = self.id_name_map.get(face_id, "未知")
                     if name == self.verify_target_user:
                         self.verify_state = 'wait_gesture'
@@ -396,18 +399,20 @@ class TerminalBackend:
             return img
 
         gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(30, 30))
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=7, minSize=(60, 60))
         now_time = time.time()
 
         for (x, y, w, h) in faces:
             # 异常捕获，极端情况也不会崩溃
             try:
-                face_id, confidence = self.recognizer.predict(gray[y:y + h, x:x + w])
+                face_roi = gray[y:y + h, x:x + w]
+                face_preprocessed = preprocess_face(face_roi)
+                face_id, confidence = self.recognizer.predict(face_preprocessed)
             except Exception:
                 name = "未知"
                 color = (0, 0, 255)
             else:
-                if confidence < 100:
+                if confidence < CONFIDENCE_THRESHOLD:
                     name = self.id_name_map.get(face_id, "未知")
                     color = (0, 255, 0)
                 else:
@@ -505,7 +510,9 @@ class TerminalBackend:
                     else:
                         fingers.append(1 if lmslist[tid][1] > lmslist[tid - 1][1] else 0)
                 else:
-                    fingers.append(1 if lmslist[tid][2] < lmslist[tid - 2][2] else 0)
+                    # 使用中间关节(PIP, tid-1)而非指根(MCP, tid-2)
+                    # PIP更接近指尖，对手部角度更鲁棒
+                    fingers.append(1 if lmslist[tid][2] < lmslist[tid - 1][2] else 0)
             finger_count = fingers.count(1)
 
         # 全局手势防抖：后续所有业务统一使用 stable_finger

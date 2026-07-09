@@ -13,6 +13,31 @@ gesture_password_path = os.path.join(DATA_ROOT, 'gesture_passwords.json')  # 手
 attendance_records_path = os.path.join(DATA_ROOT, 'attendance_records.json')  # 考勤记录
 model_file = os.path.join(trainer_path, 'trainer.yml')  # 模型文件完整路径
 
+# ========== 人脸识别优化参数 ==========
+FACE_WIDTH = 200
+FACE_HEIGHT = 200
+FACE_SIZE = (FACE_WIDTH, FACE_HEIGHT)
+CONFIDENCE_THRESHOLD = 80  # 识别置信度阈值（越低越严格，参考工作正常的项目用80）
+
+
+def is_face_quality_ok(gray_face):
+    """检测人脸图像质量，仅用于提示"""
+    h, w = gray_face.shape
+    if h < 50 or w < 50:
+        return False, f"人脸过小 ({h}x{w})"
+    face_resized = cv.resize(gray_face, FACE_SIZE)
+    laplacian_var = cv.Laplacian(face_resized, cv.CV_64F).var()
+    if laplacian_var < 5:
+        return False, f"严重模糊 ({laplacian_var:.1f})"
+    return True, f"质量({laplacian_var:.1f})"
+
+
+def preprocess_face(gray_face, target_size=FACE_SIZE):
+    """标准化人脸预处理：缩放 + 直方图均衡化"""
+    face = cv.resize(gray_face, target_size)
+    face = cv.equalizeHist(face)
+    return face
+
 
 def init_data_environment():
     """初始化数据目录：自动创建文件夹 + 迁移旧版本根目录文件"""
@@ -84,14 +109,16 @@ def input_names():
 
 def check_face_duplicate(gray_face, threshold=60):
     """
-    检测人脸是否已被注册
+    检测人脸是否已被注册（使用标准化预处理）
     """
     if not os.path.exists(model_file):
         return False, None, 999
     try:
+        # 使用与训练一致的预处理
+        face = preprocess_face(gray_face)
         recognizer = cv.face.LBPHFaceRecognizer_create()
         recognizer.read(model_file)
-        face_id, confidence = recognizer.predict(gray_face)
+        face_id, confidence = recognizer.predict(face)
 
         if os.path.exists(names_mapping_path):
             with open(names_mapping_path, 'r', encoding='utf-8') as f:
@@ -134,7 +161,6 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True, capture_c
     count = 0
     detect_interval = 5
     frame_count = 0
-    check_count = 0
     window_name = win_name if win_name else 'image'
 
     while True:
@@ -146,34 +172,27 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True, capture_c
         if frame_count % detect_interval == 0:
             faces = face_detector.detectMultiScale(gray, 1.3, 5)
 
-            for (x, y, w, h) in faces:
-                if check_count < 3:
-                    is_dup, dup_name, conf = check_face_duplicate(gray[y:y + h, x:x + w])
-                    check_count += 1
+            if len(faces) > 0:
+                # 只处理最大的人脸（避免多人干扰）
+                (x, y, w, h) = max(faces, key=lambda r: r[2] * r[3])
+                face_roi = gray[y:y + h, x:x + w]
 
-                    if is_dup:
-                        if dup_name == current_name:
-                            print(f"[信息] 检测到当前用户 [{dup_name}]，将更新人脸样本 (置信度:{conf:.1f})")
-                        else:
-                            print(f"\n[警告] 检测到重复人脸：与用户 [{dup_name}] 相似度极高")
-                            if not external_cam:
-                                cam.release()
-                                if show_preview:
-                                    cv.destroyAllWindows()
-                            return False
+                # 质量检测（仅提示不阻塞）
+                quality_ok, q_msg = is_face_quality_ok(face_roi)
+                if not quality_ok:
+                    print(f"[质量提醒] {q_msg}，仍将保存")
 
                 cv.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
                 count += 1
 
-                # 提取人脸灰度图原图
-                face_roi = gray[y:y + h, x:x + w]
-                cv.imwrite(os.path.join(dataset_path, f"User.{face_id}.{count}.jpg"), face_roi)
+                # 统一尺寸后保存，后续训练/预测都用相同预处理
+                face_normalized = cv.resize(face_roi, FACE_SIZE)
+                cv.imwrite(os.path.join(dataset_path, f"User.{face_id}.{count}.jpg"), face_normalized)
 
-                # 触发回调函数，将人脸原图送到上层去展示
                 if capture_callback:
-                    capture_callback(count, face_roi)
+                    capture_callback(count, face_normalized)
 
-                print(f"[采集进度] {count}/10 张")
+                print(f"[采集进度] {count}/10 张 | {q_msg}")
                 if count >= 10:
                     break
 
@@ -193,29 +212,37 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True, capture_c
         if show_preview:
             cv.destroyAllWindows()
 
-    return True
+    print(f"\n[信息] 人脸采集完成：共 {count} 张有效样本")
+    return count >= 10
 
 
 def train_model():
     recognizer = cv.face.LBPHFaceRecognizer_create()
-    detector = cv.CascadeClassifier("haarcascade_frontalface_default.xml")
 
     def getImagesAndLabels(path):
         imagePaths = [os.path.join(path, f) for f in os.listdir(path)]
         faceSamples = []
         ids = []
         for imagePath in imagePaths:
-            PIL_img = Image.open(imagePath).convert('L')
-            img_numpy = np.array(PIL_img, 'uint8')
+            img = cv.imread(imagePath, cv.IMREAD_GRAYSCALE)
+            if img is None:
+                print(f"[警告] 无法读取图片: {imagePath}，已跳过")
+                continue
             id = int(os.path.split(imagePath)[-1].split(".")[1])
-            faces = detector.detectMultiScale(img_numpy)
-            for (x, y, w, h) in faces:
-                faceSamples.append(img_numpy[y:y + h, x:x + w])
-                ids.append(id)
+            face = preprocess_face(img)
+            faceSamples.append(face)
+            ids.append(id)
         return faceSamples, ids, imagePaths
 
     print("\n[信息] 正在训练人脸识别模型。请稍候...")
     faces, ids, image_paths = getImagesAndLabels(dataset_path)
+
+    unique_ids = np.unique(ids)
+    if len(faces) < 5:
+        print(f"\n[错误] 有效训练样本过少（仅 {len(faces)} 张），请重新采集")
+        return
+    print(f"[信息] 共加载 {len(faces)} 张人脸样本，涉及 {len(unique_ids)} 位用户")
+
     recognizer.train(faces, np.array(ids))
     recognizer.write(model_file)
 
@@ -234,7 +261,7 @@ def train_model():
         if pred_id != real_id and conf < 55:
             real_name = id_name.get(real_id, f"ID{real_id}")
             pred_name = id_name.get(pred_id, f"ID{pred_id}")
-            warn_msg = f"样本 {os.path.basename(image_paths[idx])} 与用户 [{pred_name}] 高度相似(置信度:{conf:.1f})，疑似重复录入"
+            warn_msg = f"样本 {os.path.basename(image_paths[idx])} 与用户 [{pred_name}] 高度相似(置信度:{conf:.1f})"
             if warn_msg not in duplicate_warn:
                 duplicate_warn.append(warn_msg)
 
@@ -242,11 +269,11 @@ def train_model():
         print("\n[警告] 检测到疑似重复人脸样本：")
         for msg in duplicate_warn:
             print(f"  - {msg}")
-        print("建议清理重复样本后重新训练，避免识别混乱。")
+        print("建议清理重复样本后重新训练。")
     else:
         print("[信息] 样本校验完成，未发现明显重复人脸。")
 
-    print(f"\n[信息] {len(np.unique(ids))} 张人脸已训练。程序结束")
+    print(f"\n[信息] {len(unique_ids)} 位用户的人脸已训练完成")
 
 
 def recognize_faces():
@@ -268,18 +295,19 @@ def recognize_faces():
         return
     cam.set(3, 640)
     cam.set(4, 480)
-    minW = 0.1 * cam.get(3)
-    minH = 0.1 * cam.get(4)
     while True:
         ret, img = cam.read()
         if not ret:
             break
         gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-        faces = faceCascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(int(minW), int(minH)))
+        faces = faceCascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(60, 60))
         for (x, y, w, h) in faces:
             cv.rectangle(img, (x, y), (x + w, y + h), (255, 255, 255), 2)
-            id, confidence = recognizer.predict(gray[y:y + h, x:x + w])
-            if confidence < 100:
+            # 标准化预处理后再预测
+            face_roi = gray[y:y + h, x:x + w]
+            face_preprocessed = preprocess_face(face_roi)
+            id, confidence = recognizer.predict(face_preprocessed)
+            if confidence < CONFIDENCE_THRESHOLD:
                 name = names.get(id, "未知")
             else:
                 name = "未知"
