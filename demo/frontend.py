@@ -41,7 +41,7 @@ C = {
 FONT_TITLE = FONT_H2 = FONT_H3 = FONT_BODY = FONT_SMALL = None
 FONT_MONO = FONT_MONO_BOLD = FONT_NUM = FONT_NUM_MD = None
 
-·
+
 def _init_fonts():
     """在 root 创建后初始化字体"""
     global FONT_TITLE, FONT_H2, FONT_H3, FONT_BODY, FONT_SMALL
