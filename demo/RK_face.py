@@ -2,16 +2,60 @@ import cv2 as cv
 import numpy as np
 import os
 import json
+import time
+import shutil
+import tempfile
 from PIL import Image, ImageDraw, ImageFont
 
-# ========== 统一数据目录配置 ==========
-DATA_ROOT = 'data'
+
+# ========== 中文路径安全 I/O 封装 ==========
+# OpenCV 的 imread / imwrite / FileStorage 底层用 C 的 fopen()，不支持中文路径。
+# 以下两个函数用 Python 层 I/O 替代，彻底绕开此限制。
+
+def _cv_imread(path, flags=cv.IMREAD_GRAYSCALE):
+    """替代 cv.imread，支持中文路径"""
+    with open(path, 'rb') as f:
+        buf = np.frombuffer(f.read(), dtype=np.uint8)
+    return cv.imdecode(buf, flags)
+
+
+def _cv_imwrite(path, img):
+    """替代 cv.imwrite，支持中文路径"""
+    _, buf = cv.imencode('.jpg', img)
+    with open(path, 'wb') as f:
+        f.write(buf.tobytes())
+    return True
+
+
+def _cv_load_yml(path):
+    """替代 cv.FileStorage / recognizer.read()，支持中文路径的 YML 模型加载"""
+    with open(path, 'rb') as f:
+        content = f.read()
+    # 写入临时 ASCII 路径，再用 OpenCV 读取
+    tmp = os.path.join(tempfile.gettempdir(), 'face2hand_model_tmp.yml')
+    with open(tmp, 'wb') as f:
+        f.write(content)
+    return tmp
+
+# ========== 模块根目录（处理中文路径兼容性）==========
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ========== 统一数据目录配置（绝对路径，避免工作目录变化导致文件找不到）==========
+DATA_ROOT = os.path.join(_MODULE_DIR, 'data')
 dataset_path = os.path.join(DATA_ROOT, 'dataset')  # 人脸样本目录
 trainer_path = os.path.join(DATA_ROOT, 'trainer')  # 训练模型目录
 names_mapping_path = os.path.join(DATA_ROOT, 'names_mapping.json')  # 姓名映射
 gesture_password_path = os.path.join(DATA_ROOT, 'gesture_passwords.json')  # 手势密码
 attendance_records_path = os.path.join(DATA_ROOT, 'attendance_records.json')  # 考勤记录
 model_file = os.path.join(trainer_path, 'trainer.yml')  # 模型文件完整路径
+HAARCASCADE_SRC = os.path.join(_MODULE_DIR, 'haarcascade_frontalface_default.xml')
+
+# OpenCV C 层 fopen 不支持中文路径 → 复制到系统临时目录
+_HAARCASCADE_CACHE = os.path.join(tempfile.gettempdir(), 'face2hand_haarcascade.xml')
+if not os.path.exists(_HAARCASCADE_CACHE) or \
+   os.path.getmtime(HAARCASCADE_SRC) > os.path.getmtime(_HAARCASCADE_CACHE):
+    shutil.copy2(HAARCASCADE_SRC, _HAARCASCADE_CACHE)
+HAARCASCADE_PATH = _HAARCASCADE_CACHE
 
 # ========== 人脸识别优化参数 ==========
 FACE_WIDTH = 200
@@ -117,7 +161,9 @@ def check_face_duplicate(gray_face, threshold=60):
         # 使用与训练一致的预处理
         face = preprocess_face(gray_face)
         recognizer = cv.face.LBPHFaceRecognizer_create()
-        recognizer.read(model_file)
+        tmp_model = os.path.join(tempfile.gettempdir(), 'face2hand_model.yml')
+        shutil.copy2(model_file, tmp_model)
+        recognizer.read(tmp_model)
         face_id, confidence = recognizer.predict(face)
 
         if os.path.exists(names_mapping_path):
@@ -146,7 +192,7 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True, capture_c
 
     cam.set(3, 640)
     cam.set(4, 480)
-    face_detector = cv.CascadeClassifier('haarcascade_frontalface_default.xml')
+    face_detector = cv.CascadeClassifier(HAARCASCADE_PATH)
     print("\n[信息] 正在初始化人脸捕捉。看着摄像头并等待...")
 
     current_name = None
@@ -159,14 +205,22 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True, capture_c
                 break
 
     count = 0
-    detect_interval = 5
+    detect_interval = 3  # 降低检测间隔，更快响应
     frame_count = 0
     window_name = win_name if win_name else 'image'
+    no_face_warning_counter = 0
 
     while True:
         ret, img = cam.read()
         if not ret:
-            break
+            time.sleep(0.05)
+            continue
+
+        # Windows DirectShow 后端需要 waitKey 才能刷新帧缓冲
+        # 同时把当前帧传给回调，让前端能实时显示
+        if capture_callback:
+            capture_callback(-1, img)  # count=-1 表示仅传帧，非人脸捕获
+
         gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
 
         if frame_count % detect_interval == 0:
@@ -187,7 +241,7 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True, capture_c
 
                 # 统一尺寸后保存，后续训练/预测都用相同预处理
                 face_normalized = cv.resize(face_roi, FACE_SIZE)
-                cv.imwrite(os.path.join(dataset_path, f"User.{face_id}.{count}.jpg"), face_normalized)
+                _cv_imwrite(os.path.join(dataset_path, f"User.{face_id}.{count}.jpg"), face_normalized)
 
                 if capture_callback:
                     capture_callback(count, face_normalized)
@@ -195,15 +249,20 @@ def capture_faces(face_id, cam=None, win_name=None, show_preview=True, capture_c
                 print(f"[采集进度] {count}/10 张 | {q_msg}")
                 if count >= 10:
                     break
+            elif no_face_warning_counter == 0:
+                print("[提示] 未检测到人脸，请正对摄像头...")
+            no_face_warning_counter = (no_face_warning_counter + 1) % 60
 
-            if show_preview:
-                cv.imshow(window_name, img)
-                k = cv.waitKey(1) & 0xff
-                if k == 27 or count >= 10:
-                    break
-            else:
-                if count >= 10:
-                    break
+        if show_preview:
+            cv.imshow(window_name, img)
+            k = cv.waitKey(1) & 0xff
+            if k == 27 or count >= 10:
+                break
+        else:
+            # Windows DShow 需要 waitKey 刷新帧缓冲，否则 cam.read() 返回旧帧
+            cv.waitKey(1)
+            if count >= 10:
+                break
 
         frame_count += 1
 
@@ -224,7 +283,7 @@ def train_model():
         faceSamples = []
         ids = []
         for imagePath in imagePaths:
-            img = cv.imread(imagePath, cv.IMREAD_GRAYSCALE)
+            img = _cv_imread(imagePath)
             if img is None:
                 print(f"[警告] 无法读取图片: {imagePath}，已跳过")
                 continue
@@ -244,7 +303,10 @@ def train_model():
     print(f"[信息] 共加载 {len(faces)} 张人脸样本，涉及 {len(unique_ids)} 位用户")
 
     recognizer.train(faces, np.array(ids))
-    recognizer.write(model_file)
+    # 先写到临时 ASCII 路径，再复制到目标位置（规避中文路径 fopen 问题）
+    tmp_yml = os.path.join(tempfile.gettempdir(), 'face2hand_train_tmp.yml')
+    recognizer.write(tmp_yml)
+    shutil.copy2(tmp_yml, model_file)
 
     print("\n[信息] 正在校验人脸样本重复性...")
     duplicate_warn = []
@@ -278,8 +340,10 @@ def train_model():
 
 def recognize_faces():
     recognizer = cv.face.LBPHFaceRecognizer_create()
-    recognizer.read(model_file)
-    cascadePath = "haarcascade_frontalface_default.xml"
+    tmp_model = os.path.join(tempfile.gettempdir(), 'face2hand_model.yml')
+    shutil.copy2(model_file, tmp_model)
+    recognizer.read(tmp_model)
+    cascadePath = HAARCASCADE_PATH
     faceCascade = cv.CascadeClassifier(cascadePath)
     if os.path.exists(names_mapping_path):
         with open(names_mapping_path, 'r', encoding='utf-8') as f:
